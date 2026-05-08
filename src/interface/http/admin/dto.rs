@@ -237,23 +237,7 @@ impl AdminErrorResponse {
         }
     }
 
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new("invalid_request", message)
-    }
-
     pub fn authentication_error() -> Self {
         Self::new("authentication_error", "Invalid or missing admin API key")
-    }
-
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new("not_found", message)
-    }
-
-    pub fn api_error(message: impl Into<String>) -> Self {
-        Self::new("api_error", message)
-    }
-
-    pub fn internal_error(message: impl Into<String>) -> Self {
-        Self::new("internal_error", message)
     }
 }

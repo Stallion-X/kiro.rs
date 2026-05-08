@@ -156,7 +156,7 @@ impl AdminService {
         {
             let mut known: Vec<&str> = self.known_endpoints.iter().map(|s| s.as_str()).collect();
             known.sort();
-            return Err(AdminServiceError::InvalidCredential(format!(
+            return Err(AdminServiceError::InvalidRequest(format!(
                 "未知端点 \"{}\"，已注册端点: {:?}",
                 name, known
             )));
@@ -228,7 +228,7 @@ impl AdminService {
         req: SetLoadBalancingModeRequest,
     ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
         if req.mode != "priority" && req.mode != "balanced" {
-            return Err(AdminServiceError::InvalidCredential(
+            return Err(AdminServiceError::InvalidRequest(
                 "mode 必须是 'priority' 或 'balanced'".to_string(),
             ));
         }
@@ -257,7 +257,7 @@ fn validate_proxy_scheme(url: &str) -> Result<(), AdminServiceError> {
     {
         Ok(())
     } else {
-        Err(AdminServiceError::InvalidCredential(format!(
+        Err(AdminServiceError::InvalidRequest(format!(
             "代理 URL scheme 非法: {url}（仅允许 http/https/socks4/socks5/socks5h/direct）"
         )))
     }
