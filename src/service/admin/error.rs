@@ -26,9 +26,6 @@ pub enum AdminServiceError {
     /// 上游 HTTP 非 2xx 响应
     UpstreamHttp { status: u16, body: String },
 
-    /// 内部状态错误（通用字符串错误）
-    InternalError(String),
-
     /// 配置持久化失败（保留结构化 ConfigError）
     ConfigError(ConfigError),
 
@@ -75,7 +72,6 @@ impl fmt::Display for AdminServiceError {
             AdminServiceError::UpstreamHttp { status, body } => {
                 write!(f, "上游 HTTP {status}: {body}")
             }
-            AdminServiceError::InternalError(msg) => write!(f, "内部错误: {msg}"),
             AdminServiceError::ConfigError(e) => write!(f, "配置持久化失败: {e}"),
             AdminServiceError::DisabledByInvalidConfig(id) => {
                 write!(
@@ -123,8 +119,7 @@ impl AdminServiceError {
             | AdminServiceError::UpstreamHttp { .. } => {
                 StatusCode::BAD_GATEWAY
             }
-            AdminServiceError::InternalError(_)
-            | AdminServiceError::ConfigError(_)
+            AdminServiceError::ConfigError(_)
             | AdminServiceError::DisabledByInvalidConfig(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AdminServiceError::DuplicateRefreshToken
             | AdminServiceError::DuplicateApiKey
@@ -149,7 +144,6 @@ impl AdminServiceError {
             AdminServiceError::UpstreamError(_) => "upstream_error",
             AdminServiceError::RefreshError(_) => "refresh_error",
             AdminServiceError::UpstreamHttp { .. } => "upstream_http_error",
-            AdminServiceError::InternalError(_) => "internal_error",
             AdminServiceError::ConfigError(_) => "config_error",
             AdminServiceError::DisabledByInvalidConfig(_) => "disabled_by_invalid_config",
             AdminServiceError::DuplicateRefreshToken => "duplicate_refresh_token",
@@ -193,5 +187,274 @@ impl From<AdminPoolError> for AdminServiceError {
                 AdminServiceError::DisabledByInvalidConfig(id)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::error::{ConfigError, RefreshError};
+
+    // ── From<AdminPoolError> 映射 ──────────────────────────────────────
+
+    #[test]
+    fn from_admin_pool_error_not_found() {
+        let e: AdminServiceError = AdminPoolError::NotFound(42).into();
+        assert!(matches!(e, AdminServiceError::NotFound { id: 42 }));
+    }
+
+    #[test]
+    fn from_admin_pool_error_duplicate_refresh_token() {
+        let e: AdminServiceError = AdminPoolError::DuplicateRefreshToken.into();
+        assert!(matches!(e, AdminServiceError::DuplicateRefreshToken));
+    }
+
+    #[test]
+    fn from_admin_pool_error_duplicate_api_key() {
+        let e: AdminServiceError = AdminPoolError::DuplicateApiKey.into();
+        assert!(matches!(e, AdminServiceError::DuplicateApiKey));
+    }
+
+    #[test]
+    fn from_admin_pool_error_truncated_refresh_token() {
+        let e: AdminServiceError = AdminPoolError::TruncatedRefreshToken(32).into();
+        assert!(matches!(e, AdminServiceError::TruncatedRefreshToken(32)));
+    }
+
+    #[test]
+    fn from_admin_pool_error_empty_refresh_token() {
+        let e: AdminServiceError = AdminPoolError::EmptyRefreshToken.into();
+        assert!(matches!(e, AdminServiceError::EmptyRefreshToken));
+    }
+
+    #[test]
+    fn from_admin_pool_error_empty_api_key() {
+        let e: AdminServiceError = AdminPoolError::EmptyApiKey.into();
+        assert!(matches!(e, AdminServiceError::EmptyApiKey));
+    }
+
+    #[test]
+    fn from_admin_pool_error_missing_refresh_token() {
+        let e: AdminServiceError = AdminPoolError::MissingRefreshToken.into();
+        assert!(matches!(e, AdminServiceError::MissingRefreshToken));
+    }
+
+    #[test]
+    fn from_admin_pool_error_missing_api_key() {
+        let e: AdminServiceError = AdminPoolError::MissingApiKey.into();
+        assert!(matches!(e, AdminServiceError::MissingApiKey));
+    }
+
+    #[test]
+    fn from_admin_pool_error_not_disabled() {
+        let e: AdminServiceError = AdminPoolError::NotDisabled(7).into();
+        assert!(matches!(e, AdminServiceError::NotDisabled(7)));
+    }
+
+    #[test]
+    fn from_admin_pool_error_api_key_not_refreshable() {
+        let e: AdminServiceError = AdminPoolError::ApiKeyNotRefreshable.into();
+        assert!(matches!(e, AdminServiceError::ApiKeyNotRefreshable));
+    }
+
+    #[test]
+    fn from_admin_pool_error_disabled_by_invalid_config() {
+        let e: AdminServiceError = AdminPoolError::DisabledByInvalidConfig(99).into();
+        assert!(matches!(e, AdminServiceError::DisabledByInvalidConfig(99)));
+    }
+
+    #[test]
+    fn from_admin_pool_error_refresh_preserves_structure() {
+        let e: AdminServiceError = AdminPoolError::Refresh(RefreshError::TokenInvalid).into();
+        assert!(matches!(e, AdminServiceError::RefreshError(RefreshError::TokenInvalid)));
+    }
+
+    #[test]
+    fn from_admin_pool_error_config_preserves_structure() {
+        let e: AdminServiceError =
+            AdminPoolError::Config(ConfigError::Validation("bad field".into())).into();
+        assert!(matches!(e, AdminServiceError::ConfigError(_)));
+    }
+
+    #[test]
+    fn from_admin_pool_error_upstream_http() {
+        let e: AdminServiceError = AdminPoolError::UpstreamHttp {
+            status: 502,
+            body: "gateway timeout".into(),
+        }
+        .into();
+        assert!(matches!(e, AdminServiceError::UpstreamHttp {
+            status: 502,
+            body,
+        } if body == "gateway timeout"));
+    }
+
+    #[test]
+    fn from_admin_pool_error_network() {
+        let e: AdminServiceError =
+            AdminPoolError::Network("connection refused".into()).into();
+        assert!(matches!(e, AdminServiceError::UpstreamError(msg) if msg == "connection refused"));
+    }
+
+    // ── status_code() ──────────────────────────────────────────────────
+
+    #[test]
+    fn status_code_not_found() {
+        assert_eq!(
+            AdminServiceError::NotFound { id: 1 }.status_code(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn status_code_upstream_error() {
+        assert_eq!(
+            AdminServiceError::UpstreamError("oops".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn status_code_refresh_error() {
+        assert_eq!(
+            AdminServiceError::RefreshError(RefreshError::TokenInvalid).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn status_code_upstream_http() {
+        assert_eq!(
+            AdminServiceError::UpstreamHttp { status: 503, body: String::new() }.status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn status_code_config_error() {
+        assert_eq!(
+            AdminServiceError::ConfigError(ConfigError::Validation("x".into())).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn status_code_disabled_by_invalid_config() {
+        assert_eq!(
+            AdminServiceError::DisabledByInvalidConfig(1).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn status_code_credential_validation() {
+        // 所有凭据校验错误都返回 400
+        let variants: &[AdminServiceError] = &[
+            AdminServiceError::DuplicateRefreshToken,
+            AdminServiceError::DuplicateApiKey,
+            AdminServiceError::TruncatedRefreshToken(12),
+            AdminServiceError::EmptyRefreshToken,
+            AdminServiceError::MissingRefreshToken,
+            AdminServiceError::EmptyApiKey,
+            AdminServiceError::MissingApiKey,
+            AdminServiceError::NotDisabled(3),
+            AdminServiceError::ApiKeyNotRefreshable,
+            AdminServiceError::InvalidRequest("bad param".into()),
+        ];
+        for v in variants {
+            assert_eq!(
+                v.status_code(),
+                StatusCode::BAD_REQUEST,
+                "variant {v:?} should be 400"
+            );
+        }
+    }
+
+    // ── into_response() ────────────────────────────────────────────────
+
+    #[test]
+    fn into_response_not_found() {
+        let r = AdminServiceError::NotFound { id: 42 }.into_response();
+        assert_eq!(r.error.error_type, "not_found");
+        assert!(r.error.message.contains("42"));
+    }
+
+    #[test]
+    fn into_response_upstream_error() {
+        let r =
+            AdminServiceError::UpstreamError("connection reset".into()).into_response();
+        assert_eq!(r.error.error_type, "upstream_error");
+        assert!(r.error.message.contains("connection reset"));
+    }
+
+    #[test]
+    fn into_response_refresh_error() {
+        let r =
+            AdminServiceError::RefreshError(RefreshError::TokenInvalid).into_response();
+        assert_eq!(r.error.error_type, "refresh_error");
+        assert!(r.error.message.contains("invalid_grant"));
+    }
+
+    #[test]
+    fn into_response_upstream_http() {
+        let r = AdminServiceError::UpstreamHttp { status: 502, body: "bad gateway".into() }
+            .into_response();
+        assert_eq!(r.error.error_type, "upstream_http_error");
+        assert!(r.error.message.contains("502"));
+    }
+
+    #[test]
+    fn into_response_config_error() {
+        let r = AdminServiceError::ConfigError(ConfigError::Validation("bad".into()))
+            .into_response();
+        assert_eq!(r.error.error_type, "config_error");
+        assert!(r.error.message.contains("bad"));
+    }
+
+    #[test]
+    fn into_response_disabled_by_invalid_config() {
+        let r = AdminServiceError::DisabledByInvalidConfig(7).into_response();
+        assert_eq!(r.error.error_type, "disabled_by_invalid_config");
+        assert!(r.error.message.contains('7'));
+    }
+
+    #[test]
+    fn into_response_duplicate_refresh_token() {
+        let r = AdminServiceError::DuplicateRefreshToken.into_response();
+        assert_eq!(r.error.error_type, "duplicate_refresh_token");
+        assert!(r.error.message.contains("refreshToken"));
+    }
+
+    #[test]
+    fn into_response_invalid_request() {
+        let r = AdminServiceError::InvalidRequest("bad param".into()).into_response();
+        assert_eq!(r.error.error_type, "invalid_request");
+        assert!(r.error.message.contains("bad param"));
+    }
+
+    #[test]
+    fn into_response_all_error_types_unique() {
+        let responses: Vec<_> = vec![
+            AdminServiceError::NotFound { id: 1 }.into_response(),
+            AdminServiceError::UpstreamError("x".into()).into_response(),
+            AdminServiceError::RefreshError(RefreshError::TokenInvalid).into_response(),
+            AdminServiceError::UpstreamHttp { status: 500, body: "x".into() }.into_response(),
+            AdminServiceError::ConfigError(ConfigError::Validation("x".into())).into_response(),
+            AdminServiceError::DisabledByInvalidConfig(1).into_response(),
+            AdminServiceError::DuplicateRefreshToken.into_response(),
+            AdminServiceError::DuplicateApiKey.into_response(),
+            AdminServiceError::TruncatedRefreshToken(1).into_response(),
+            AdminServiceError::EmptyRefreshToken.into_response(),
+            AdminServiceError::MissingRefreshToken.into_response(),
+            AdminServiceError::EmptyApiKey.into_response(),
+            AdminServiceError::MissingApiKey.into_response(),
+            AdminServiceError::NotDisabled(1).into_response(),
+            AdminServiceError::ApiKeyNotRefreshable.into_response(),
+            AdminServiceError::InvalidRequest("x".into()).into_response(),
+        ];
+        let types: Vec<_> = responses.iter().map(|r| &r.error.error_type).collect();
+        // 16 个变体，16 个唯一的 error_type
+        let unique: std::collections::HashSet<_> = types.iter().collect();
+        assert_eq!(unique.len(), types.len(), "duplicate error_type found");
     }
 }

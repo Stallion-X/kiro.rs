@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::domain::credential::Credential;
-use crate::domain::error::{ConfigError, KiroError, ProviderError, RefreshError};
+use crate::domain::error::{KiroError, ProviderError, RefreshError};
 use crate::domain::retry::DisabledReason;
 use crate::domain::selector::{
     CredentialSelector, CredentialStateView, CredentialStatsView, CredentialView,
