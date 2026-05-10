@@ -257,13 +257,30 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     let pool_for_shutdown = pool.clone();
+    let (shutdown_started_tx, shutdown_started_rx) = tokio::sync::oneshot::channel();
+
     // graceful shutdown：信号触发后等所有连接关闭再返回；用 timeout 兜底防止
-    // 长 SSE 连接卡住 flush_stats（30s 上限）
-    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
-    match tokio::time::timeout(std::time::Duration::from_secs(30), serve).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::error!("HTTP 服务异常退出: {}", e),
-        Err(_) => tracing::warn!("graceful shutdown 超时 30s，强制退出（仍会 flush_stats）"),
+    // 长 SSE 连接卡住 flush_stats（30s 上限）。注意 timeout 只能在收到信号后启动。
+    let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let _ = shutdown_started_tx.send(());
+    });
+    let serve = std::future::IntoFuture::into_future(serve);
+    tokio::pin!(serve);
+    tokio::pin!(shutdown_started_rx);
+    tokio::select! {
+        result = serve.as_mut() => {
+            if let Err(e) = result {
+                tracing::error!("HTTP 服务异常退出: {}", e);
+            }
+        }
+        _ = shutdown_started_rx.as_mut() => {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), serve.as_mut()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::error!("HTTP 服务异常退出: {}", e),
+                Err(_) => tracing::warn!("graceful shutdown 超时 30s，强制退出（仍会 flush_stats）"),
+            }
+        }
     }
 
     // 进程退出前显式 flush stats，避免最后一窗口的统计因未到 30s debounce 丢失
