@@ -1,7 +1,7 @@
 //! 本地 token 估算（迁移自 src/token.rs，删除 OnceLock 全局静态与远程 API 调用路径）
 //!
 //! 项目唯一的本地 token 估算函数（流式与非流式共用）。
-//! 流式路径在 [`super::delivery::StreamContext`] 中累积输出文本，最终在
+//! 流式路径在 [`super::stream::StreamContext`] 中累积输出文本，最终在
 //! `generate_final_events` 阶段一次性调用 [`count_tokens`] 估算 output_tokens。
 //!
 //! # 计算规则

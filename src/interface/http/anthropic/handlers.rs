@@ -30,9 +30,9 @@ use super::models::supported_models;
 use crate::interface::http::error::kiro_error_response;
 use crate::service::conversation::converter::{ConversionError, convert_request};
 use crate::service::conversation::delivery::DeliveryMode;
-use crate::service::conversation::delivery::{BufferedStreamContext, StreamContext};
 use crate::service::conversation::error::{FatalKiroError, is_fatal_exception};
 use crate::service::conversation::reducer::SseEvent;
+use crate::service::conversation::stream::{BufferedStreamContext, StreamContext};
 use crate::service::conversation::websearch;
 
 /// 将 ProviderError 包装为 KiroError 后委托给统一的错误响应映射。

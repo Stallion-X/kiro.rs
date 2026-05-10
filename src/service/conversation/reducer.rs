@@ -6,8 +6,9 @@
 //! 3. `message_delta` 必须在所有 `content_block_stop` 之后
 //! 4. `message_stop` 在最后
 //!
-//! 与之配合的"业务侧"代码（`StreamContext` / `BufferedStreamContext`）位于
-//! [`super::delivery`]，本模块不感知 thinking / tool_use 等业务状态，只做最低层的事件守门。
+//! 与之配合的"业务侧"代码（[`super::stream::StreamContext`] /
+//! [`super::stream::BufferedStreamContext`]）位于 [`super::stream`]，本模块不感知
+//! thinking / tool_use 等业务状态，只做最低层的事件守门。
 
 use std::collections::HashMap;
 

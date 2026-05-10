@@ -6,6 +6,7 @@ pub mod converter;
 pub mod delivery;
 pub mod error;
 pub mod reducer;
+pub mod stream;
 pub mod thinking;
 pub mod tokens;
 pub mod tools;
