@@ -509,6 +509,8 @@ async fn handle_non_stream_request(
     }
 
     let mut text_content = String::new();
+    let mut reasoning_text = String::new();
+    let mut reasoning_signature: Option<String> = None;
     let mut tool_uses: Vec<serde_json::Value> = Vec::new();
     let mut has_tool_use = false;
     let mut stop_reason = "end_turn".to_string();
@@ -526,6 +528,12 @@ async fn handle_non_stream_request(
                     match event {
                         Event::AssistantResponse(resp) => {
                             text_content.push_str(&resp.content);
+                        }
+                        Event::ReasoningContent(reasoning) => {
+                            reasoning_text.push_str(&reasoning.text);
+                            if let Some(sig) = reasoning.signature {
+                                reasoning_signature = Some(sig);
+                            }
                         }
                         Event::ToolUse(tool_use) => {
                             has_tool_use = true;
@@ -606,22 +614,37 @@ async fn handle_non_stream_request(
     let mut content: Vec<serde_json::Value> = Vec::new();
 
     if thinking_enabled {
-        // 从完整文本中提取 thinking 块
-        let (thinking, remaining_text) =
-            super::stream::extract_thinking_from_complete_text(&text_content);
-
-        if let Some(thinking_text) = thinking {
+        if !reasoning_text.is_empty() {
+            // 原生 reasoningContentEvent（非流式聚合）优先，带上游签发的真实 signature
             content.push(json!({
                 "type": "thinking",
-                "thinking": thinking_text
+                "thinking": reasoning_text,
+                "signature": reasoning_signature.unwrap_or_default()
             }));
-        }
+            if !text_content.is_empty() {
+                content.push(json!({
+                    "type": "text",
+                    "text": text_content
+                }));
+            }
+        } else {
+            // 回退：从完整文本中提取嵌入的 `<thinking>` XML（老式合成式路径）
+            let (thinking, remaining_text) =
+                super::stream::extract_thinking_from_complete_text(&text_content);
 
-        if !remaining_text.is_empty() {
-            content.push(json!({
-                "type": "text",
-                "text": remaining_text
-            }));
+            if let Some(thinking_text) = thinking {
+                content.push(json!({
+                    "type": "thinking",
+                    "thinking": thinking_text
+                }));
+            }
+
+            if !remaining_text.is_empty() {
+                content.push(json!({
+                    "type": "text",
+                    "text": remaining_text
+                }));
+            }
         }
     } else if !text_content.is_empty() {
         content.push(json!({
