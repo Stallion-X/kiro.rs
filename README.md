@@ -1,6 +1,10 @@
 # kiro-rs
 
+**该项目基于 [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) 进行二次开发**
+
 一个用 Rust 编写的 Anthropic Claude API 兼容代理服务，将 Anthropic API 请求转换为 Kiro API 请求。
+
+**已新增重要功能：高级模型去除伪Thinking，支持原生Thinking透传和effort参数透传**
 
 ---
 
