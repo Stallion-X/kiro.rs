@@ -542,6 +542,10 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// reasoning 块是否打开（Q 上游 reasoningContentEvent 推的原生推理流，与嵌入 `<thinking>` 标签路径互斥）
+    pub reasoning_block_open: bool,
+    /// reasoning 块末尾 payload 带的 signature，暂存到关闭块时随 signature_delta 发出
+    pub pending_reasoning_signature: Option<String>,
 }
 
 impl StreamContext {
@@ -568,6 +572,8 @@ impl StreamContext {
             thinking_block_index: None,
             text_block_index: None,
             strip_thinking_leading_newline: false,
+            reasoning_block_open: false,
+            pending_reasoning_signature: None,
         }
     }
 
@@ -633,8 +639,17 @@ impl StreamContext {
     /// 处理 Kiro 事件并转换为 Anthropic SSE 事件
     pub fn process_kiro_event(&mut self, event: &Event) -> Vec<SseEvent> {
         match event {
-            Event::AssistantResponse(resp) => self.process_assistant_response(&resp.content),
-            Event::ToolUse(tool_use) => self.process_tool_use(tool_use),
+            Event::ReasoningContent(reasoning) => self.process_reasoning_content(reasoning),
+            Event::AssistantResponse(resp) => {
+                let mut events = self.close_reasoning_if_open();
+                events.extend(self.process_assistant_response(&resp.content));
+                events
+            }
+            Event::ToolUse(tool_use) => {
+                let mut events = self.close_reasoning_if_open();
+                events.extend(self.process_tool_use(tool_use));
+                events
+            }
             Event::ContextUsage(context_usage) => {
                 // 从上下文使用百分比计算实际的 input_tokens
                 let window_size = get_context_window_size(&self.model);
@@ -674,6 +689,99 @@ impl StreamContext {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// 处理 reasoningContentEvent — Q 上游对 thinking 模型推送的独立推理流。
+    /// 与老式嵌入 `<thinking>` 标签路径互斥：发 content_block_start(thinking) + thinking_delta，
+    /// signature 暂存到 close_reasoning_if_open 时随 signature_delta 一并发出。
+    fn process_reasoning_content(
+        &mut self,
+        reasoning: &crate::kiro::model::events::ReasoningContentEvent,
+    ) -> Vec<SseEvent> {
+        let mut events = Vec::new();
+
+        if !self.reasoning_block_open {
+            let index = self.state_manager.next_block_index();
+            self.thinking_block_index = Some(index);
+            self.reasoning_block_open = true;
+            events.extend(self.state_manager.handle_content_block_start(
+                index,
+                "thinking",
+                json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": { "type": "thinking", "thinking": "" }
+                }),
+            ));
+        }
+
+        let index = match self.thinking_block_index {
+            Some(i) => i,
+            None => return events,
+        };
+
+        if !reasoning.text.is_empty() {
+            self.output_tokens += estimate_tokens(&reasoning.text);
+            if let Some(delta_event) = self.state_manager.handle_content_block_delta(
+                index,
+                json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": { "type": "thinking_delta", "thinking": reasoning.text }
+                }),
+            ) {
+                events.push(delta_event);
+            }
+        }
+
+        if let Some(sig) = &reasoning.signature {
+            self.pending_reasoning_signature = Some(sig.clone());
+        }
+
+        events
+    }
+
+    /// 切到 text/tool_use 或流结束前关闭 reasoning 块：先发 signature_delta（Anthropic 规范要求紧接 stop 前），再发 content_block_stop
+    fn close_reasoning_if_open(&mut self) -> Vec<SseEvent> {
+        if !self.reasoning_block_open {
+            return Vec::new();
+        }
+        let index = match self.thinking_block_index {
+            Some(i) => i,
+            None => {
+                self.reasoning_block_open = false;
+                return Vec::new();
+            }
+        };
+
+        let mut events = Vec::new();
+
+        let signature = match self.pending_reasoning_signature.take() {
+            Some(sig) if !sig.is_empty() => sig,
+            _ => {
+                tracing::warn!(
+                    "reasoning 块关闭时无 signature（上游未在 reasoningContentEvent 中提供），使用空串占位；下一轮回写该 thinking 块可能被上游拒"
+                );
+                String::new()
+            }
+        };
+        if let Some(delta_event) = self.state_manager.handle_content_block_delta(
+            index,
+            json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "signature_delta", "signature": signature }
+            }),
+        ) {
+            events.push(delta_event);
+        }
+
+        if let Some(stop_event) = self.state_manager.handle_content_block_stop(index) {
+            events.push(stop_event);
+        }
+        self.reasoning_block_open = false;
+        self.thinking_block_index = None;
+        events
     }
 
     /// 处理助手响应事件
@@ -1044,6 +1152,11 @@ impl StreamContext {
     pub fn generate_final_events(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
+        // reasoning-only 流（无后续 text/tool_use）在结束前关闭 reasoning 块；
+        // close_reasoning_if_open 会清空 thinking_block_index，先快照供下方 thinking-only 语义判断
+        let had_thinking_block = self.thinking_block_index.is_some();
+        events.extend(self.close_reasoning_if_open());
+
         // Flush thinking_buffer 中的剩余内容
         if self.thinking_enabled && !self.thinking_buffer.is_empty() {
             if self.in_thinking_block {
@@ -1110,7 +1223,7 @@ impl StreamContext {
         // 则设置 stop_reason 为 max_tokens（表示模型耗尽了 token 预算在思考上），
         // 并补发一套完整的 text 事件（内容为一个空格），确保 content 数组中有 text 块
         if self.thinking_enabled
-            && self.thinking_block_index.is_some()
+            && (had_thinking_block || self.thinking_block_index.is_some())
             && !self.state_manager.has_non_thinking_blocks()
         {
             self.state_manager.set_stop_reason("max_tokens");
