@@ -6,6 +6,17 @@
 
 **已新增重要功能：高级模型去除伪Thinking，支持原生Thinking透传和effort参数透传**
 
+### OpenCode配置effort
+```json
+"variants": {
+  "low": { "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": {"effort": "low"} },
+  "medium": { "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": {"effort": "medium"} },
+  "high": { "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": {"effort": "high"} },
+  "xhigh": { "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": {"effort": "xhigh"} },
+  "max": { "thinking": { "type": "adaptive", "display": "summarized" }, "output_config": {"effort": "max"} }
+}
+```
+
 ---
 
 <table>
