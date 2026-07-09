@@ -119,6 +119,17 @@ pub fn get_context_window_size(model: &str) -> i32 {
     }
 }
 
+/// 判断模型是否支持 Kiro 后端原生 reasoning（4.6+）
+///
+/// 这些模型后端会主动推送 reasoningContentEvent，并支持通过顶层
+/// additionalModelRequestFields 调节 effort。据此跳过伪 thinking 前缀注入。
+pub fn model_supports_native_reasoning(model: &str) -> bool {
+    matches!(
+        map_model(model).as_deref(),
+        Some("claude-opus-4.6") | Some("claude-opus-4.7") | Some("claude-opus-4.8") | Some("claude-sonnet-4.6")
+    )
+}
+
 /// 转换结果
 #[derive(Debug)]
 pub struct ConversionResult {
@@ -126,6 +137,8 @@ pub struct ConversionResult {
     pub conversation_state: ConversationState,
     /// 工具名称映射（短名称 → 原始名称），仅当存在超长工具名时非空
     pub tool_name_map: HashMap<String, String>,
+    /// Kiro 后端顶层 additionalModelRequestFields（原生 reasoning effort 控制），无则 None
+    pub additional_model_request_fields: Option<serde_json::Value>,
 }
 
 /// 转换错误
@@ -332,6 +345,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
     Ok(ConversionResult {
         conversation_state,
         tool_name_map,
+        additional_model_request_fields: build_additional_model_request_fields(req),
     })
 }
 
@@ -617,6 +631,9 @@ fn convert_tools(tools: &Option<Vec<super::types::Tool>>, tool_name_map: &mut Ha
 
 /// 生成thinking标签前缀
 fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
+    if model_supports_native_reasoning(&req.model) {
+        return None;
+    }
     if let Some(t) = &req.thinking {
         if t.thinking_type == "enabled" {
             return Some(format!(
@@ -641,6 +658,28 @@ fn generate_thinking_prefix(req: &MessagesRequest) -> Option<String> {
 /// 检查内容是否已包含thinking标签
 fn has_thinking_tags(content: &str) -> bool {
     content.contains("<thinking_mode>") || content.contains("<max_thinking_length>")
+}
+
+/// 为 4.6+ 原生 reasoning 模型构造 Kiro 后端顶层 additionalModelRequestFields，
+/// 将客户端 thinking + output_config.effort 转为后端 reasoning 强度控制；
+/// 仅在客户端启用 thinking 时注入，effort 缺省 high
+fn build_additional_model_request_fields(req: &MessagesRequest) -> Option<serde_json::Value> {
+    if !model_supports_native_reasoning(&req.model) {
+        return None;
+    }
+    let thinking_enabled = req.thinking.as_ref().map(|t| t.is_enabled()).unwrap_or(false);
+    if !thinking_enabled {
+        return None;
+    }
+    let effort = req
+        .output_config
+        .as_ref()
+        .map(|c| c.effort.clone())
+        .unwrap_or_else(|| "high".to_string());
+    Some(serde_json::json!({
+        "thinking": { "type": "adaptive", "display": "summarized" },
+        "output_config": { "effort": effort }
+    }))
 }
 
 /// 构建历史消息
