@@ -1,0 +1,66 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "kiro": {
+      "npm": "@ai-sdk/anthropic",
+      "name": "Kiro Local",
+      "options": {
+        "baseURL": "http://127.0.0.1:8990/v1",
+        "apiKey": "{env:KIRO_RS_API_KEY}"
+      },
+      "models": {
+        "gpt-5.6-sol": {
+          "name": "GPT 5.6 Sol",
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 272000,
+            "output": 128000
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {},
+            "max": {}
+          }
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT 5.6 Terra",
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 272000,
+            "output": 128000
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {},
+            "max": {}
+          }
+        },
+        "gpt-5.6-luna": {
+          "name": "GPT 5.6 Luna",
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 272000,
+            "output": 128000
+          },
+          "variants": {
+            "low": {},
+            "medium": {},
+            "high": {},
+            "xhigh": {},
+            "max": {}
+          }
+        }
+      }
+    }
+  }
+}
