@@ -75,6 +75,60 @@ pub async fn get_models() -> impl IntoResponse {
 
     let models = vec![
         Model {
+            id: "gpt-5.6-sol".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Sol".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.6-sol-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Sol (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.6-terra".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Terra".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.6-terra-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Terra (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.6-luna".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Luna".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "gpt-5.6-luna-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1783900800,
+            owned_by: "openai".to_string(),
+            display_name: "GPT 5.6 Luna (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
             id: "claude-opus-4-8".to_string(),
             object: "model".to_string(),
             created: 1779897600, // May 28, 2026
@@ -145,6 +199,24 @@ pub async fn get_models() -> impl IntoResponse {
             display_name: "Claude Sonnet 4.6 (Thinking)".to_string(),
             model_type: "chat".to_string(),
             max_tokens: 64000,
+        },
+        Model {
+            id: "claude-sonnet-5".to_string(),
+            object: "model".to_string(),
+            created: 1783296000,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
+        },
+        Model {
+            id: "claude-sonnet-5-thinking".to_string(),
+            object: "model".to_string(),
+            created: 1783296000,
+            owned_by: "anthropic".to_string(),
+            display_name: "Claude Sonnet 5 (Thinking)".to_string(),
+            model_type: "chat".to_string(),
+            max_tokens: 128_000,
         },
         Model {
             id: "claude-opus-4-5-20251101".to_string(),
@@ -693,8 +765,9 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
 
     let is_opus_4_6 =
         model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_gpt_5_6 = model_lower.contains("gpt-5.6");
 
-    let thinking_type = if is_opus_4_6 {
+    let thinking_type = if is_opus_4_6 || is_gpt_5_6 {
         "adaptive"
     } else {
         "enabled"
@@ -711,7 +784,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         budget_tokens: 20000,
     });
     
-    if is_opus_4_6 {
+    if is_opus_4_6 || is_gpt_5_6 {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
         });
