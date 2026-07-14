@@ -79,9 +79,18 @@ Complete all chunked operations without commentary.";
 /// 严格对照版本号
 pub fn map_model(model: &str) -> Option<String> {
     let model_lower = model.to_lowercase();
+    let gpt_model = model_lower.replace(' ', "-");
 
-    if model_lower.contains("sonnet") {
-        if model_lower.contains("4-6") || model_lower.contains("4.6") {
+    if gpt_model == "gpt-5.6" || gpt_model.contains("gpt-5.6-sol") {
+        Some("gpt-5.6-sol".to_string())
+    } else if gpt_model.contains("gpt-5.6-terra") {
+        Some("gpt-5.6-terra".to_string())
+    } else if gpt_model.contains("gpt-5.6-luna") {
+        Some("gpt-5.6-luna".to_string())
+    } else if model_lower.contains("sonnet") {
+        if model_lower == "claude-sonnet-5" || model_lower.contains("sonnet-5-") {
+            Some("claude-sonnet-5".to_string())
+        } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
         } else if model_lower.contains("4-5") || model_lower.contains("4.5") {
             Some("claude-sonnet-4.5".to_string())
@@ -114,7 +123,8 @@ pub fn map_model(model: &str) -> Option<String> {
 /// 4.7 / 4.8 同 1M
 pub fn get_context_window_size(model: &str) -> i32 {
     match map_model(model) {
-        Some(mapped) if mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
+        Some(mapped) if mapped.starts_with("gpt-5.6-") => 272_000,
+        Some(mapped) if mapped == "claude-sonnet-5" || mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" || mapped == "claude-opus-4.8" => 1_000_000,
         _ => 200_000,
     }
 }
@@ -126,7 +136,21 @@ pub fn get_context_window_size(model: &str) -> i32 {
 pub fn model_supports_native_reasoning(model: &str) -> bool {
     matches!(
         map_model(model).as_deref(),
-        Some("claude-opus-4.6") | Some("claude-opus-4.7") | Some("claude-opus-4.8") | Some("claude-sonnet-4.6")
+        Some("gpt-5.6-sol")
+            | Some("gpt-5.6-terra")
+            | Some("gpt-5.6-luna")
+            | Some("claude-opus-4.6")
+            | Some("claude-opus-4.7")
+            | Some("claude-opus-4.8")
+            | Some("claude-sonnet-4.6")
+            | Some("claude-sonnet-5")
+    )
+}
+
+fn model_uses_reasoning_effort_field(model: &str) -> bool {
+    matches!(
+        map_model(model).as_deref(),
+        Some("gpt-5.6-sol") | Some("gpt-5.6-terra") | Some("gpt-5.6-luna")
     )
 }
 
@@ -676,10 +700,16 @@ fn build_additional_model_request_fields(req: &MessagesRequest) -> Option<serde_
         .as_ref()
         .map(|c| c.effort.clone())
         .unwrap_or_else(|| "high".to_string());
-    Some(serde_json::json!({
-        "thinking": { "type": "adaptive", "display": "summarized" },
-        "output_config": { "effort": effort }
-    }))
+    if model_uses_reasoning_effort_field(&req.model) {
+        Some(serde_json::json!({
+            "reasoning": { "type": "enabled", "effort": effort }
+        }))
+    } else {
+        Some(serde_json::json!({
+            "thinking": { "type": "adaptive", "display": "summarized" },
+            "output_config": { "effort": effort }
+        }))
+    }
 }
 
 /// 构建历史消息
@@ -1006,6 +1036,67 @@ mod tests {
             Some("claude-opus-4.8".to_string())
         );
         assert_eq!(get_context_window_size("claude-opus-4-8"), 1_000_000);
+    }
+
+    #[test]
+    fn test_map_model_sonnet_5_native_reasoning() {
+        assert_eq!(
+            map_model("claude-sonnet-5"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-thinking"),
+            Some("claude-sonnet-5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-sonnet-5"), 1_000_000);
+        assert!(model_supports_native_reasoning("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn test_map_model_gpt_5_6_native_reasoning() {
+        assert_eq!(map_model("gpt-5.6"), Some("gpt-5.6-sol".to_string()));
+        assert_eq!(
+            map_model("gpt-5.6-sol-thinking"),
+            Some("gpt-5.6-sol".to_string())
+        );
+        assert_eq!(
+            map_model("GPT 5.6 Terra"),
+            Some("gpt-5.6-terra".to_string())
+        );
+        assert_eq!(
+            map_model("gpt-5.6-luna-thinking"),
+            Some("gpt-5.6-luna".to_string())
+        );
+        assert_eq!(get_context_window_size("gpt-5.6-terra"), 272_000);
+        assert!(model_supports_native_reasoning("gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn test_gpt_5_6_reasoning_effort_uses_reasoning_field() {
+        let req = MessagesRequest {
+            model: "gpt-5.6-sol".to_string(),
+            max_tokens: 1024,
+            messages: vec![super::super::types::Message {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
+            stream: false,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            thinking: Some(super::super::types::Thinking {
+                thinking_type: "adaptive".to_string(),
+                budget_tokens: 20000,
+            }),
+            output_config: Some(super::super::types::OutputConfig {
+                effort: "xhigh".to_string(),
+            }),
+            metadata: None,
+        };
+
+        let result = build_additional_model_request_fields(&req).unwrap();
+        assert_eq!(result["reasoning"]["effort"], "xhigh");
+        assert!(result.get("output_config").is_none());
     }
 
     #[test]
