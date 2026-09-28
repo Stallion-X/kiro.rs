@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::kiro::model::events::Event;
 
+use super::cache::{self, CacheUsage};
+
 /// 找到小于等于目标位置的最近有效UTF-8字符边界
 ///
 /// UTF-8字符可能占用1-4个字节，直接按字节位置切片可能会切在多字节字符中间导致panic。
@@ -450,8 +452,7 @@ impl SseStateManager {
     /// 生成最终事件序列
     pub fn generate_final_events(
         &mut self,
-        input_tokens: i32,
-        output_tokens: i32,
+        usage: serde_json::Value,
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
@@ -480,10 +481,7 @@ impl SseStateManager {
                         "stop_reason": self.get_stop_reason(),
                         "stop_sequence": null
                     },
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens
-                    }
+                    "usage": usage
                 }),
             ));
         }
@@ -548,6 +546,8 @@ pub struct StreamContext {
     completion_signal_seen: bool,
     text_content: String,
     tool_calls: HashMap<String, (String, bool)>,
+    /// prompt cache 三段拆分（未使用断点时为 None）
+    pub cache_usage: Option<CacheUsage>,
 }
 
 impl StreamContext {
@@ -581,6 +581,7 @@ impl StreamContext {
             completion_signal_seen: false,
             text_content: String::new(),
             tool_calls: HashMap::new(),
+            cache_usage: None,
         }
     }
 
@@ -610,8 +611,16 @@ impl StreamContext {
         })
     }
 
+    /// 设置 prompt cache 拆分
+    pub fn with_cache_usage(mut self, cache_usage: Option<CacheUsage>) -> Self {
+        self.cache_usage = cache_usage;
+        self
+    }
+
     /// 生成 message_start 事件
     pub fn create_message_start_event(&self) -> serde_json::Value {
+        let (input_tokens, cache_read, cache_creation) =
+            cache::split_input(self.input_tokens as i64, self.cache_usage);
         json!({
             "type": "message_start",
             "message": {
@@ -623,8 +632,10 @@ impl StreamContext {
                 "stop_reason": null,
                 "stop_sequence": null,
                 "usage": {
-                    "input_tokens": self.input_tokens,
-                    "output_tokens": 1
+                    "input_tokens": input_tokens,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": cache_creation,
+                    "cache_read_input_tokens": cache_read
                 }
             }
         })
@@ -1327,11 +1338,18 @@ impl StreamContext {
 
         // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
+        let (input_tokens, cache_read, cache_creation) =
+            cache::split_input(final_input_tokens as i64, self.cache_usage);
 
         // 生成最终事件
         events.extend(
             self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
+                .generate_final_events(json!({
+                    "input_tokens": input_tokens,
+                    "output_tokens": self.output_tokens,
+                    "cache_creation_input_tokens": cache_creation,
+                    "cache_read_input_tokens": cache_read
+                })),
         );
         events
     }

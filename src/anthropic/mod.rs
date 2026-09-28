@@ -23,6 +23,7 @@
 //! ```
 
 mod converter;
+mod cache;
 mod handlers;
 mod middleware;
 mod response;

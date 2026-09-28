@@ -460,6 +460,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `*sonnet-4.6*` | `claude-sonnet-4.6` |
 | `*sonnet-4.5*` | `claude-sonnet-4.5` |
 | `claude-opus-5` | `claude-opus-5` |
+| `claude-opus-5-5` | `claude-opus-5.5` |
 | `*opus-4.5*` 至 `*opus-4.8*` | 对应版本的 Claude Opus |
 | `*haiku*` | `claude-haiku-4.5` |
 

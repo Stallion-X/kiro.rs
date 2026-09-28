@@ -136,6 +136,7 @@ where
         {
             Ok(Some(vec![SystemMessage {
                 text: value.to_string(),
+                cache_control: None,
             }]))
         }
 
@@ -184,6 +185,20 @@ pub struct Message {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SystemMessage {
     pub text: String,
+    /// prompt cache 断点（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// cache_control 断点（Anthropic prompt caching）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheControl {
+    /// 断点类型，目前仅有 "ephemeral"
+    #[serde(rename = "type")]
+    pub cc_type: String,
+    /// 缓存保留时长："5m"（默认）或 "1h"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
 }
 
 /// 工具定义
@@ -208,6 +223,9 @@ pub struct Tool {
     /// 最大使用次数（仅 WebSearch 工具）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<i32>,
+    /// prompt cache 断点（可选，Anthropic 语义中放在最后一个工具上）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// 内容块
