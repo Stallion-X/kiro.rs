@@ -114,12 +114,12 @@ fn map_provider_error(err: Error) -> Response {
         )
             .into_response();
     }
-    tracing::error!("Kiro API 调用失败: {}", err);
+    tracing::error!("Kiro API 调用失败: {:#}", err);
     (
         StatusCode::BAD_GATEWAY,
         Json(ErrorResponse::new(
             "api_error",
-            format!("上游 API 调用失败: {}", err),
+            format!("上游 API 调用失败: {:#}", err),
         )),
     )
         .into_response()
