@@ -28,6 +28,17 @@ const MAX_TOTAL_RETRIES: usize = 9;
 pub(super) const STREAM_START_ATTEMPTS: usize = 3;
 const STREAM_ATTEMPT_RETRY_LIMIT: usize = MAX_TOTAL_RETRIES / STREAM_START_ATTEMPTS;
 
+/// 链路级重试次数（请求根本没送达上游：DNS / 连接 / TLS / 超时）
+///
+/// 与凭据预算和流式预算解耦：链路故障既不能归咎于凭据（不切换、不禁用），
+/// 也不是上游在流里报错（不消耗流式重启预算）。基础预算只有 3 次尝试、
+/// 退避 200/400ms，窗口不足 1 秒，扛不住任何一次网络抖动，因此单独补一段窗口。
+const LINK_RETRY_LIMIT: usize = 4;
+
+/// 链路级重试退避基数（1s / 2s / 4s / 8s，合计约 15 秒）
+const LINK_RETRY_BASE_MS: u64 = 1_000;
+const LINK_RETRY_MAX_DELAY_MS: u64 = 8_000;
+
 pub(super) type SharedStreamRetryBudget = Arc<Mutex<StreamRetryBudget>>;
 
 pub(super) struct StreamRetryBudget {
@@ -65,6 +76,17 @@ impl StreamRetryBudget {
             .iter()
             .filter_map(|(&id, &attempts)| (attempts >= MAX_RETRIES_PER_CREDENTIAL).then_some(id))
             .collect()
+    }
+
+    /// 退还一次已记录的尝试
+    ///
+    /// 请求根本没送达上游时（链路故障）不该消耗流式重启预算：否则 3 次链路抖动
+    /// 就会把凭据拉进排除集，后续链路级重试拿到「预算已耗尽」而不是继续发请求。
+    fn release(&mut self, credential_id: u64) {
+        self.total_attempts = self.total_attempts.saturating_sub(1);
+        if let Some(attempts) = self.attempts_by_credential.get_mut(&credential_id) {
+            *attempts = attempts.saturating_sub(1);
+        }
     }
 
     pub(super) fn can_retry(&self) -> bool {
@@ -465,7 +487,11 @@ impl KiroProvider {
         // 尝试从请求体中提取模型信息
         let model = Self::extract_model_from_request(request_body);
 
-        for attempt in 0..max_retries {
+        // 非链路级失败（凭据/额度/上游状态）只能用完基础预算，多出来的迭代留给链路级重试
+        let max_attempts = max_retries + LINK_RETRY_LIMIT;
+
+        for attempt in 0..max_attempts {
+            let non_link_budget_exhausted = attempt + 1 >= max_retries;
             let excluded_credentials = retry_budget
                 .map(|budget| budget.lock().excluded_credentials())
                 .unwrap_or_default();
@@ -478,6 +504,9 @@ impl KiroProvider {
                 Ok(c) => c,
                 Err(e) => {
                     last_error = Some(e);
+                    if non_link_budget_exhausted {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -487,6 +516,9 @@ impl KiroProvider {
                     "流式 API 请求失败：凭据 #{} 或总重试预算已耗尽",
                     ctx.id
                 ));
+                if non_link_budget_exhausted {
+                    break;
+                }
                 continue;
             }
 
@@ -498,6 +530,9 @@ impl KiroProvider {
                 Err(e) => {
                     last_error = Some(e);
                     self.token_manager.report_failure(ctx.id);
+                    if non_link_budget_exhausted {
+                        break;
+                    }
                     continue;
                 }
             };
@@ -528,17 +563,30 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    tracing::warn!(
-                        "API 请求发送失败（尝试 {}/{}）: {}",
-                        attempt + 1,
-                        max_retries,
-                        describe_error(&e)
-                    );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
+                    // 基础预算内的尝试算 0，额外的迭代才是链路级重试（决定用哪档退避）
+                    let link_retries_used = attempt.saturating_sub(max_retries.saturating_sub(1));
+                    tracing::warn!(
+                        "API 请求发送失败（尝试 {}/{}，链路级重试 {}/{}）: {}",
+                        attempt + 1,
+                        max_attempts,
+                        link_retries_used,
+                        LINK_RETRY_LIMIT,
+                        describe_error(&e)
+                    );
+                    // 请求没有送达上游：退还已记的流式重启预算，让链路级重试继续用同一张凭据
+                    if let Some(budget) = retry_budget {
+                        budget.lock().release(ctx.id);
+                    }
                     last_error = Some(e.into());
-                    if attempt + 1 < max_retries {
-                        sleep(Self::retry_delay(attempt)).await;
+                    if attempt + 1 < max_attempts {
+                        let backoff = if link_retries_used == 0 {
+                            Self::retry_delay(attempt)
+                        } else {
+                            Self::link_retry_delay(link_retries_used - 1)
+                        };
+                        sleep(backoff).await;
                     }
                     continue;
                 }
@@ -564,9 +612,10 @@ impl KiroProvider {
                         "API 上游错误响应体读取失败，正在重试"
                     );
                     last_error = Some(error);
-                    if attempt + 1 < max_retries {
-                        sleep(Self::retry_delay(attempt)).await;
+                    if non_link_budget_exhausted {
+                        break;
                     }
+                    sleep(Self::retry_delay(attempt)).await;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -579,6 +628,9 @@ impl KiroProvider {
                 tracing::warn!("上游拒绝 thinking signature，剥离历史 reasoningContent 后重试一次");
                 active_request_body = fallback;
                 fallback_used = true;
+                if non_link_budget_exhausted {
+                    break;
+                }
                 continue;
             }
 
@@ -608,6 +660,9 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                if non_link_budget_exhausted {
+                    break;
+                }
                 continue;
             }
 
@@ -633,6 +688,9 @@ impl KiroProvider {
                     match self.token_manager.force_refresh_token_for(ctx.id).await {
                         Ok(()) => {
                             tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
+                            if non_link_budget_exhausted {
+                                break;
+                            }
                             continue;
                         }
                         Err(error)
@@ -668,6 +726,9 @@ impl KiroProvider {
                     status,
                     body
                 ));
+                if non_link_budget_exhausted {
+                    break;
+                }
                 continue;
             }
 
@@ -687,9 +748,10 @@ impl KiroProvider {
                     status,
                     body
                 ));
-                if attempt + 1 < max_retries {
-                    sleep(Self::retry_delay(attempt)).await;
+                if non_link_budget_exhausted {
+                    break;
                 }
+                sleep(Self::retry_delay(attempt)).await;
                 continue;
             }
 
@@ -712,9 +774,10 @@ impl KiroProvider {
                 status,
                 body
             ));
-            if attempt + 1 < max_retries {
-                sleep(Self::retry_delay(attempt)).await;
+            if non_link_budget_exhausted {
+                break;
             }
+            sleep(Self::retry_delay(attempt)).await;
         }
 
         // 所有重试都失败
@@ -757,14 +820,26 @@ impl KiroProvider {
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
     }
+
+    /// 链路级重试退避：1s / 2s / 4s / 8s（每次 +0..200ms 抖动）
+    ///
+    /// 链路故障（DNS / 连接 / TLS / 超时）恢复时间通常是秒级，用基础预算的
+    /// 200/400ms 退避来不及等到链路恢复，等于没重试。
+    pub(super) fn link_retry_delay(attempt: usize) -> Duration {
+        let exp = LINK_RETRY_BASE_MS.saturating_mul(2u64.saturating_pow(attempt.min(8) as u32));
+        let backoff = exp.min(LINK_RETRY_MAX_DELAY_MS);
+        let jitter = fastrand::u64(0..=200);
+        Duration::from_millis(backoff.saturating_add(jitter))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        KiroProvider, MAX_RETRIES_PER_CREDENTIAL, MAX_TOTAL_RETRIES, StreamRetryBudget,
-        read_error_body,
+        KiroProvider, LINK_RETRY_LIMIT, MAX_RETRIES_PER_CREDENTIAL, MAX_TOTAL_RETRIES,
+        StreamRetryBudget, read_error_body,
     };
+    use std::collections::HashSet;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -784,6 +859,36 @@ mod tests {
         // Then: no credential exceeds three requests and the global cap is nine.
         assert_eq!(budget.total_attempts(), MAX_TOTAL_RETRIES);
         assert!(!budget.try_record(4));
+    }
+
+    #[test]
+    fn link_level_failure_refunds_stream_retry_budget() {
+        // Given: one credential that already burned its whole per-credential allowance
+        let mut budget = StreamRetryBudget::new(1);
+        for _ in 0..MAX_RETRIES_PER_CREDENTIAL {
+            assert!(budget.try_record(1));
+        }
+        assert_eq!(budget.excluded_credentials(), HashSet::from([1]));
+
+        // When: a request that never reached upstream is refunded
+        budget.release(1);
+
+        // Then: the credential is usable again instead of looking exhausted
+        assert!(budget.excluded_credentials().is_empty());
+        assert!(budget.can_retry());
+        assert!(budget.try_record(1));
+        assert_eq!(budget.total_attempts(), MAX_RETRIES_PER_CREDENTIAL);
+    }
+
+    #[test]
+    fn link_retry_backoff_spans_about_fifteen_seconds() {
+        let total: u64 = (0..LINK_RETRY_LIMIT)
+            .map(|attempt| KiroProvider::link_retry_delay(attempt).as_millis() as u64)
+            .sum();
+        let capped = KiroProvider::link_retry_delay(usize::MAX).as_millis() as u64;
+
+        assert!((15_000..=15_800).contains(&total), "total={total}");
+        assert!((8_000..=8_200).contains(&capped), "capped={capped}");
     }
 
     #[tokio::test]
