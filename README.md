@@ -456,6 +456,7 @@ RUST_LOG=debug ./target/release/kiro-rs
 | `gpt-5.6` / `*gpt-5.6-sol*` | `gpt-5.6-sol` |
 | `*gpt-5.6-terra*` | `gpt-5.6-terra` |
 | `*gpt-5.6-luna*` | `gpt-5.6-luna` |
+| `claude-sonnet-5-5` | `claude-sonnet-5.5` |
 | `claude-sonnet-5` | `claude-sonnet-5` |
 | `*sonnet-4.6*` | `claude-sonnet-4.6` |
 | `*sonnet-4.5*` | `claude-sonnet-4.5` |
