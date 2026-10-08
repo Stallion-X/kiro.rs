@@ -81,6 +81,22 @@ async fn read_error_body(response: reqwest::Response) -> anyhow::Result<String> 
     response.text().await.context("读取上游错误响应体失败")
 }
 
+/// 展开错误的完整来源链
+///
+/// `reqwest::Error` 的 `Display` 只会给出 `error sending request for url (...)`，
+/// 真正的链路原因（DNS 解析失败 / 连接被重置 / TLS 握手失败 / 超时）在 `source()` 链里，
+/// 不展开就无法区分「上游 5xx」和「本机到上游的链路断了」。
+fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut description = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        description.push_str(" -> ");
+        description.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    description
+}
+
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 429) || status.is_server_error()
 }
@@ -300,7 +316,7 @@ impl KiroProvider {
                         "MCP 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        describe_error(&e)
                     );
                     last_error = Some(e.into());
                     if attempt + 1 < max_retries {
@@ -516,7 +532,7 @@ impl KiroProvider {
                         "API 请求发送失败（尝试 {}/{}）: {}",
                         attempt + 1,
                         max_retries,
-                        e
+                        describe_error(&e)
                     );
                     // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
                     // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
