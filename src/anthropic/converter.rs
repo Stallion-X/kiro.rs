@@ -109,7 +109,11 @@ pub fn map_model(model: &str) -> Option<String> {
     } else if gpt_model.contains("gpt-5.6-luna") {
         Some("gpt-5.6-luna".to_string())
     } else if model_lower.contains("sonnet") {
-        if model_lower == "claude-sonnet-5" || model_lower.contains("sonnet-5-") {
+        if model_lower == "claude-sonnet-5-5" || model_lower.contains("sonnet-5-5-") {
+            // Anthropic-compatible IDs use hyphens; Kiro's IDE API uses the
+            // dotted family ID for versioned Sonnet models.
+            Some("claude-sonnet-5.5".to_string())
+        } else if model_lower == "claude-sonnet-5" || model_lower.contains("sonnet-5-") {
             Some("claude-sonnet-5".to_string())
         } else if model_lower.contains("4-6") || model_lower.contains("4.6") {
             Some("claude-sonnet-4.6".to_string())
@@ -154,7 +158,8 @@ pub fn get_context_window_size(model: &str) -> i32 {
         Some(mapped)
             if matches!(
                 mapped.as_str(),
-                "claude-sonnet-5"
+                "claude-sonnet-5.5"
+                    | "claude-sonnet-5"
                     | "claude-sonnet-4.6"
                     | "claude-opus-5.5"
                     | "claude-opus-5"
@@ -186,6 +191,7 @@ pub fn model_supports_native_reasoning(model: &str) -> bool {
             | Some("claude-opus-4.8")
             | Some("claude-sonnet-4.6")
             | Some("claude-sonnet-5")
+            | Some("claude-sonnet-5.5")
     )
 }
 
@@ -1376,6 +1382,24 @@ mod tests {
         );
         assert_eq!(get_context_window_size("claude-sonnet-5"), 1_000_000);
         assert!(model_supports_native_reasoning("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn test_map_model_sonnet_5_5_native_reasoning() {
+        assert_eq!(
+            map_model("claude-sonnet-5-5"),
+            Some("claude-sonnet-5.5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-5-thinking"),
+            Some("claude-sonnet-5.5".to_string())
+        );
+        assert_eq!(
+            map_model("claude-sonnet-5-5-20261002"),
+            Some("claude-sonnet-5.5".to_string())
+        );
+        assert_eq!(get_context_window_size("claude-sonnet-5-5"), 1_000_000);
+        assert!(model_supports_native_reasoning("claude-sonnet-5-5"));
     }
 
     #[test]
