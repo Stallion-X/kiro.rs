@@ -58,7 +58,9 @@ fn record_stream_error(target: &mut Option<String>, message: impl Into<String>) 
 }
 
 fn log_stream_read_error(error: &Error) {
-    let Some(diagnostic) = error.downcast_ref::<crate::kiro::stream_response::StreamReadError>()
+    let Some(diagnostic) = error.chain().find_map(|source| {
+        source.downcast_ref::<crate::kiro::stream_response::StreamReadError>()
+    })
     else {
         tracing::error!(error = %error, "读取响应流失败");
         return;
@@ -681,6 +683,11 @@ fn create_sse_stream(
                         Some(Err(e)) => {
                             log_stream_read_error(&e);
                             if e
+                                .downcast_ref::<crate::kiro::stream_response::BufferedStreamError>()
+                                .is_some()
+                            {
+                                ctx.set_stream_error(e.to_string());
+                            } else if e
                                 .downcast_ref::<crate::kiro::stream_response::StreamTruncatedError>()
                                 .is_some()
                             {

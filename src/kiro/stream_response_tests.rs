@@ -45,6 +45,31 @@ fn assistant_frame() -> Vec<u8> {
     )
 }
 
+fn reasoning_frame(text: &str, signature: Option<&str>) -> Vec<u8> {
+    let payload = serde_json::json!({
+        "text": text,
+        "signature": signature,
+    });
+    event_stream_frame(
+        &[
+            (":message-type", "event"),
+            (":event-type", "reasoningContentEvent"),
+        ],
+        &payload.to_string(),
+    )
+}
+
+fn redacted_reasoning_frame(data: &str) -> Vec<u8> {
+    let payload = serde_json::json!({"redactedContent": data});
+    event_stream_frame(
+        &[
+            (":message-type", "event"),
+            (":event-type", "reasoningContentEvent"),
+        ],
+        &payload.to_string(),
+    )
+}
+
 async fn response_server<B>(body: B) -> (String, tokio::task::JoinHandle<()>)
 where
     B: Fn(usize) -> Vec<u8> + Clone + Send + Sync + 'static,
@@ -141,6 +166,58 @@ async fn truncated_response_server(
     )
 }
 
+async fn truncated_reasoning_then_recovery_server(
+    recovery: Vec<u8>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
+    let server = tokio::spawn(async move {
+        let mut request = [0_u8; 4096];
+        let (mut first_socket, _) = listener.accept().await.expect("client should connect");
+        let _ = first_socket
+            .read(&mut request)
+            .await
+            .expect("first request should be readable");
+        let incomplete = reasoning_frame("incomplete reasoning", None);
+        let first_headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            incomplete.len() + 64
+        );
+        first_socket
+            .write_all(first_headers.as_bytes())
+            .await
+            .expect("first headers should be written");
+        first_socket
+            .write_all(&incomplete)
+            .await
+            .expect("incomplete reasoning should be written");
+        drop(first_socket);
+
+        let (mut second_socket, _) = listener.accept().await.expect("client should retry");
+        let _ = second_socket
+            .read(&mut request)
+            .await
+            .expect("retry request should be readable");
+        let second_headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            recovery.len()
+        );
+        second_socket
+            .write_all(second_headers.as_bytes())
+            .await
+            .expect("retry headers should be written");
+        second_socket
+            .write_all(&recovery)
+            .await
+            .expect("recovery body should be written");
+    });
+    (format!("http://{address}/"), server)
+}
+
 async fn collect(response: KiroStreamResponse) -> anyhow::Result<Vec<u8>> {
     let mut stream = Box::pin(response.bytes_stream());
     let mut body = Vec::new();
@@ -206,6 +283,199 @@ async fn transient_first_event_is_retried_before_response_is_exposed() {
     // Then: probing is lazy, retries once, and replays only the recovered bytes.
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(actual, assistant_frame());
+}
+
+#[tokio::test]
+async fn unsigned_reasoning_is_retried_before_response_is_exposed() {
+    // Given: one attempt moves from reasoning to answer without the required signature.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let recovered = [
+        reasoning_frame("complete reasoning", Some("sig-valid")),
+        assistant_frame(),
+    ]
+    .concat();
+    let expected = recovered.clone();
+    let (url, server) = response_server(move |attempt| {
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt == 0 {
+            [
+                reasoning_frame("incomplete reasoning", None),
+                assistant_frame(),
+            ]
+            .concat()
+        } else {
+            recovered.clone()
+        }
+    })
+    .await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    // When: the downstream consumes the stream.
+    let actual = collect(response)
+        .await
+        .expect("the signed retry should be exposed");
+    server.abort();
+
+    // Then: no bytes from the invalid attempt escape to the Anthropic client.
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn signed_reasoning_is_exposed_without_retry() {
+    // Given: the first attempt supplies the required signature.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let expected = [
+        reasoning_frame("reasoning", Some("sig-valid")),
+        assistant_frame(),
+    ]
+    .concat();
+    let body = expected.clone();
+    let (url, server) = response_server(move |_| {
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        body.clone()
+    })
+    .await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    // When: the downstream consumes the stream.
+    let actual = collect(response)
+        .await
+        .expect("the signed stream should be exposed");
+    server.abort();
+
+    // Then: valid reasoning is replayed unchanged from the first attempt.
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn separately_delivered_reasoning_signature_is_exposed_without_retry() {
+    // Given: Kiro sends reasoning text and its signature in separate events.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let expected = [
+        reasoning_frame("reasoning", None),
+        reasoning_frame("", Some("sig-valid")),
+        assistant_frame(),
+    ]
+    .concat();
+    let body = expected.clone();
+    let (url, server) = response_server(move |_| {
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        body.clone()
+    })
+    .await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    let actual = collect(response)
+        .await
+        .expect("the complete reasoning block should be exposed");
+    server.abort();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn redacted_reasoning_is_exposed_without_signature() {
+    // Given: redacted reasoning is a complete block and does not carry a signature.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let expected = [redacted_reasoning_frame("opaque"), assistant_frame()].concat();
+    let body = expected.clone();
+    let (url, server) = response_server(move |_| {
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        body.clone()
+    })
+    .await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    let actual = collect(response)
+        .await
+        .expect("redacted reasoning should remain valid");
+    server.abort();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn repeated_unsigned_reasoning_fails_without_exposing_partial_bytes() {
+    // Given: every attempt transitions to answer content without a reasoning signature.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let (url, server) = response_server(move |_| {
+        server_attempts.fetch_add(1, Ordering::SeqCst);
+        [reasoning_frame("incomplete", None), assistant_frame()].concat()
+    })
+    .await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    let mut stream = response.bytes_stream();
+    let error = stream
+        .next()
+        .await
+        .expect("the exhausted stream should emit an error")
+        .expect_err("unsigned reasoning must remain a visible failure after retries");
+    server.abort();
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert!(error.downcast_ref::<BufferedStreamError>().is_some());
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn truncated_unsigned_reasoning_retries_without_leaking_partial_bytes() {
+    // Given: the transport drops after unsigned reasoning, matching an unexpected body EOF.
+    let expected = [
+        reasoning_frame("reasoning", Some("sig-valid")),
+        assistant_frame(),
+    ]
+    .concat();
+    let (url, server) = truncated_reasoning_then_recovery_server(expected.clone()).await;
+    let initial = reqwest::get(url.clone())
+        .await
+        .expect("initial response should arrive");
+    let retry_url = url.clone();
+    let response =
+        KiroStreamResponse::with_retry_request(initial, move || reqwest::get(retry_url.clone()));
+
+    // When: the first upstream body ends before its declared length.
+    let actual = collect(response)
+        .await
+        .expect("the signed retry should recover the stream");
+    server.await.expect("test server should exit");
+
+    // Then: only the complete signed attempt reaches the Anthropic stream converter.
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test]

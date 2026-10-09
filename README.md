@@ -51,7 +51,7 @@
 - **Token 自动刷新**: 自动管理和刷新 OAuth Token
 - **多凭据支持**: 支持配置多个凭据，按优先级自动故障转移
 - **负载均衡**: 支持 `priority`（按优先级）和 `balanced`（均衡分配）两种模式
-- **智能重试**: 单凭据最多重试 3 次，单请求最多重试 9 次
+- **智能重试**: 单凭据最多重试 3 次，单请求最多重试 9 次；首个原生 reasoning 块在收到签名前暂存，断流时自动重试，避免向客户端发送无签名 thinking 块
 - **凭据回写**: 多凭据格式下自动回写刷新后的 Token
 - **Thinking 模式**: 支持 Claude 的 extended thinking 功能
 - **原生 Reasoning**: 支持 GPT 5.6、Claude 4.6+ 与 Claude 5 的 reasoning 事件和 effort 参数
