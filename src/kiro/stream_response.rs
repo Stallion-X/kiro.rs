@@ -15,7 +15,7 @@ use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::{KiroProvider, STREAM_START_ATTEMPTS, SharedStreamRetryBudget};
 
 use diagnostics::StreamDiagnostics;
-pub(crate) use diagnostics::{StreamReadError, StreamTruncatedError};
+pub(crate) use diagnostics::{BufferedStreamError, StreamReadError, StreamTruncatedError};
 
 const TRANSIENT_UPSTREAM_ERROR: &str =
     "Encountered an unexpected error when processing the request, please try again.";
@@ -37,6 +37,7 @@ struct ProbeState {
     decoder: EventStreamDecoder,
     prefetched: Vec<Bytes>,
     prefetched_bytes: usize,
+    unsigned_reasoning_seen: bool,
 }
 
 enum StreamMode {
@@ -57,7 +58,22 @@ struct RetryStreamState {
 enum ProbeDecision {
     Continue,
     Ready,
-    Retry,
+    Retry(ProbeRetryReason),
+}
+
+#[derive(Clone, Copy)]
+enum ProbeRetryReason {
+    TransientUpstream,
+    UnsignedReasoning,
+}
+
+impl ProbeRetryReason {
+    fn description(self) -> &'static str {
+        match self {
+            Self::TransientUpstream => "上游返回瞬态异常",
+            Self::UnsignedReasoning => "reasoning 流在签名前结束",
+        }
+    }
 }
 
 impl ProbeState {
@@ -67,6 +83,7 @@ impl ProbeState {
             decoder: EventStreamDecoder::new(),
             prefetched: Vec::new(),
             prefetched_bytes: 0,
+            unsigned_reasoning_seen: false,
         }
     }
 
@@ -84,8 +101,34 @@ impl ProbeState {
         for frame in self.decoder.decode_iter() {
             let event = Event::from_frame(frame.context("解码 Kiro 流首帧失败")?)
                 .context("解析 Kiro 流首事件失败")?;
+            if let Event::ReasoningContent(reasoning) = &event {
+                if reasoning
+                    .redacted_content
+                    .as_deref()
+                    .is_some_and(|content| !content.is_empty())
+                {
+                    return if self.unsigned_reasoning_seen {
+                        Ok(ProbeDecision::Retry(ProbeRetryReason::UnsignedReasoning))
+                    } else {
+                        Ok(ProbeDecision::Ready)
+                    };
+                }
+                if reasoning
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| !signature.trim().is_empty())
+                {
+                    self.unsigned_reasoning_seen = false;
+                    return Ok(ProbeDecision::Ready);
+                }
+                self.unsigned_reasoning_seen = true;
+                continue;
+            }
+            if self.unsigned_reasoning_seen && is_terminal_start_event(&event) {
+                return Ok(ProbeDecision::Retry(ProbeRetryReason::UnsignedReasoning));
+            }
             if is_retryable_start_event(&event) {
-                return Ok(ProbeDecision::Retry);
+                return Ok(ProbeDecision::Retry(ProbeRetryReason::TransientUpstream));
             }
             if is_terminal_start_event(&event) {
                 return Ok(ProbeDecision::Ready);
@@ -203,18 +246,31 @@ impl KiroStreamResponse {
                                     state.mode = StreamMode::Probe(probe)
                                 }
                                 Ok(ProbeDecision::Ready) => state.mode = probe.into_replay(),
-                                Ok(ProbeDecision::Retry) if state.can_retry() => {
+                                Ok(ProbeDecision::Retry(reason)) if state.can_retry() => {
                                     tracing::warn!(
                                         attempt = state.attempt,
                                         max_attempts = STREAM_START_ATTEMPTS,
-                                        "Kiro 流启动时返回瞬态异常，正在重试"
+                                        reason = reason.description(),
+                                        "Kiro 流在安全输出前失败，正在重试"
                                     );
                                     match state.restart().await {
                                         Ok(next) => state.mode = StreamMode::Probe(next),
                                         Err(error) => return Some((Err(error), state)),
                                     }
                                 }
-                                Ok(ProbeDecision::Retry) => state.mode = probe.into_replay(),
+                                Ok(ProbeDecision::Retry(ProbeRetryReason::TransientUpstream)) => {
+                                    state.mode = probe.into_replay()
+                                }
+                                Ok(ProbeDecision::Retry(ProbeRetryReason::UnsignedReasoning)) => {
+                                    return Some((
+                                        Err(BufferedStreamError::new(
+                                            "Kiro reasoning stream ended without a signature before downstream exposure",
+                                            None,
+                                        )
+                                        .into()),
+                                        state,
+                                    ));
+                                }
                                 Err(error) => return Some((Err(error), state)),
                             }
                         }
@@ -232,20 +288,34 @@ impl KiroStreamResponse {
                         }
                         Some(Err(error)) => {
                             let error = state.diagnostics.read_error(state.attempt, error);
-                            return Some((Err(error.into()), state));
+                            let message = if probe.unsigned_reasoning_seen {
+                                "Kiro reasoning stream ended without a signature before downstream exposure"
+                            } else {
+                                "Kiro stream failed before safe downstream exposure"
+                            };
+                            return Some((
+                                Err(BufferedStreamError::new(message, Some(error.into())).into()),
+                                state,
+                            ));
                         }
                         None if state.can_retry() => match state.restart().await {
                             Ok(next) => state.mode = StreamMode::Probe(next),
                             Err(error) => return Some((Err(error), state)),
                         },
                         None => {
-                            let error = match probe.decoder.finish() {
-                                Ok(()) => {
-                                    anyhow::anyhow!("Kiro stream ended before its first event")
-                                }
-                                Err(error) => StreamTruncatedError::new(error).into(),
+                            let source = match probe.decoder.finish() {
+                                Ok(()) => None,
+                                Err(error) => Some(StreamTruncatedError::new(error).into()),
                             };
-                            return Some((Err(error), state));
+                            let message = if probe.unsigned_reasoning_seen {
+                                "Kiro reasoning stream ended without a signature before downstream exposure"
+                            } else {
+                                "Kiro stream ended before its first event"
+                            };
+                            return Some((
+                                Err(BufferedStreamError::new(message, source).into()),
+                                state,
+                            ));
                         }
                     },
                     StreamMode::Replay(mut chunks, stream) => match chunks.next() {
@@ -302,7 +372,6 @@ fn is_terminal_start_event(event: &Event) -> bool {
         event,
         Event::AssistantResponse(_)
             | Event::ToolUse(_)
-            | Event::ReasoningContent(_)
             | Event::Error { .. }
             | Event::Exception { .. }
     )

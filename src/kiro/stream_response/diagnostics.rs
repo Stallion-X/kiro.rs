@@ -45,6 +45,12 @@ pub(crate) struct StreamTruncatedError {
     source: ParseError,
 }
 
+#[derive(Debug)]
+pub(crate) struct BufferedStreamError {
+    message: &'static str,
+    source: Option<anyhow::Error>,
+}
+
 impl StreamDiagnostics {
     pub(super) fn new(response: &reqwest::Response) -> Self {
         let now = Instant::now();
@@ -137,6 +143,12 @@ impl StreamTruncatedError {
     }
 }
 
+impl BufferedStreamError {
+    pub(super) fn new(message: &'static str, source: Option<anyhow::Error>) -> Self {
+        Self { message, source }
+    }
+}
+
 impl fmt::Display for StreamReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.source.fmt(formatter)
@@ -162,6 +174,24 @@ impl fmt::Display for StreamTruncatedError {
 impl Error for StreamTruncatedError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Some(&self.source)
+    }
+}
+
+impl fmt::Display for BufferedStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)?;
+        if let Some(source) = &self.source {
+            write!(formatter, ": {source:#}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for BufferedStreamError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| source.as_ref() as &(dyn Error + 'static))
     }
 }
 
