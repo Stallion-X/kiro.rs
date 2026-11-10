@@ -132,7 +132,22 @@ fn default_region() -> String {
 }
 
 fn default_kiro_version() -> String {
-    "0.11.107".to_string()
+    "0.12.333".to_string()
+}
+
+/// 服务端接受的最低 Kiro IDE 版本，低于此版本返回
+/// 403 `This version of Kiro is no longer supported`（FEATURE_NOT_SUPPORTED）
+const MIN_SUPPORTED_KIRO_VERSION: (u64, u64, u64) = (0, 12, 0);
+
+/// 判断 kiroVersion 是否低于服务端支持的最低版本；无法解析的自定义值视为未过期
+fn is_outdated_kiro_version(version: &str) -> bool {
+    let mut parts = version.trim().split('.').map(|p| p.parse::<u64>());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
+            (major, minor, patch) < MIN_SUPPORTED_KIRO_VERSION
+        }
+        _ => false,
+    }
 }
 
 fn default_system_version() -> String {
@@ -226,6 +241,17 @@ impl Config {
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;
         config.config_path = Some(path.to_path_buf());
+
+        if is_outdated_kiro_version(&config.kiro_version) {
+            let upgraded = default_kiro_version();
+            tracing::warn!(
+                "配置的 kiroVersion {} 已不被 Kiro 服务端支持，自动改用 {}",
+                config.kiro_version,
+                upgraded
+            );
+            config.kiro_version = upgraded;
+        }
+
         Ok(config)
     }
 
@@ -245,5 +271,53 @@ impl Config {
         fs::write(path, content)
             .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_from_json(json: &str) -> Config {
+        let dir = std::env::temp_dir().join(format!("kiro-rs-config-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        fs::write(&path, json).unwrap();
+        let config = Config::load(&path).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        config
+    }
+
+    #[test]
+    fn test_default_kiro_version_is_supported() {
+        assert_eq!(default_kiro_version(), "0.12.333");
+        assert!(!is_outdated_kiro_version(&default_kiro_version()));
+    }
+
+    #[test]
+    fn test_load_upgrades_outdated_kiro_version() {
+        let config = load_from_json(r#"{"kiroVersion":"0.11.107"}"#);
+        assert_eq!(config.kiro_version, default_kiro_version());
+    }
+
+    #[test]
+    fn test_load_keeps_supported_kiro_version() {
+        let config = load_from_json(r#"{"kiroVersion":"0.13.5"}"#);
+        assert_eq!(config.kiro_version, "0.13.5");
+    }
+
+    #[test]
+    fn test_load_keeps_unparsable_kiro_version() {
+        let config = load_from_json(r#"{"kiroVersion":"custom-build"}"#);
+        assert_eq!(config.kiro_version, "custom-build");
+    }
+
+    #[test]
+    fn test_is_outdated_kiro_version_boundaries() {
+        assert!(is_outdated_kiro_version("0.9.2"));
+        assert!(is_outdated_kiro_version("0.11.999"));
+        assert!(!is_outdated_kiro_version("0.12.0"));
+        assert!(!is_outdated_kiro_version("1.0.0"));
+        assert!(!is_outdated_kiro_version("not-a-version"));
     }
 }
