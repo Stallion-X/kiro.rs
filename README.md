@@ -89,6 +89,7 @@
 - [项目结构](#项目结构)
 - [技术栈](#技术栈)
 - [License](#license)
+- [贡献者](#贡献者)
 - [致谢](#致谢)
 
 ## 开始
@@ -556,6 +557,12 @@ kiro-rs/
 ## License
 
 MIT
+
+## 贡献者
+
+<a href="https://github.com/Stallion-X/kiro.rs/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Stallion-X/kiro.rs" alt="Contributors" />
+</a>
 
 ## 致谢
 
